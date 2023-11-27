@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <title>Network Monitor</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+
+<body>
+  <h1>Network Monitoring Data</h1>
+  <div>
+    Incoming Bytes: <span id="inBytes">0</span> Mbps<br />
+    Outgoing Bytes: <span id="outBytes">0</span> Mbps<br />
+    Incoming Errors: <span id="inError">0</span><br />
+    Outgoing Errors: <span id="outError">0</span><br />
+    Incoming Unicast: <span id="inUnicast">0</span><br />
+    Outgoing Unicast: <span id="outUnicast">0</span><br />
+    Incoming Discards: <span id="inDiscard">0</span><br />
+    Outgoing Discards: <span id="outDiscard">0</span><br />
+    Incoming Non-Unicast: <span id="inNonUnicast">0</span><br />
+    Outgoing Non-Unicast: <span id="outNonUnicast">0</span><br />
+  </div>
+  <div>
+    <canvas id="networkChart"></canvas>
+    <canvas id="networkStatsChart"></canvas>
+  </div>
+
+  <script>
+    document.addEventListener("DOMContentLoaded", function () {
+      var ctx = document.getElementById("networkChart").getContext("2d");
+      var networkChart = new Chart(ctx, {
+        type: "line",
+        data: {
+          labels: [], // Time Labels
+          datasets: [
+            {
+              label: "Incoming Bytes",
+              data: [],
+              borderColor: "blue",
+              fill: false,
+              lineTension: 0.3,
+            },
+            {
+              label: "Outgoing Bytes",
+              data: [],
+              borderColor: "green",
+              fill: false,
+              lineTension: 0.3,
+            },
+          ],
+        },
+        options: {
+          scales: {
+            xAxes: [
+              {
+                type: "realtime",
+                realtime: {
+                  delay: 1000,
+                  refresh: 1000,
+                  duration: 120000,
+                },
+              },
+            ],
+          },
+        },
+      });
+
+      var ctxStats = document
+        .getElementById("networkStatsChart")
+        .getContext("2d");
+      var networkStatsChart = new Chart(ctxStats, {
+        type: "line",
+        data: {
+          labels: [], // Time Labels
+          datasets: [
+            {
+              label: "Average In Speed",
+              data: [],
+              borderColor: "orange",
+              fill: false,
+              lineTension: 0.3,
+            },
+            {
+              label: "Max In Speed",
+              data: [],
+              borderColor: "red",
+              fill: false,
+            },
+            {
+              label: "Min In Speed",
+              data: [],
+              borderColor: "purple",
+              fill: false,
+              lineTension: 0.3,
+            },
+          ],
+        },
+        options: {
+          scales: {
+            xAxes: [
+              {
+                type: "realtime",
+                realtime: {
+                  delay: 1000,
+                  refresh: 1000,
+                  duration: 120000,
+                },
+              },
+            ],
+          },
+        },
+      });
+
+      var fetchDataCount = 0;
+      var labelUpdateInterval = 60;
+
+      function fetchData() {
+        var xhr = new XMLHttpRequest();
+        xhr.onreadystatechange = function () {
+          if (this.readyState == 4 && this.status == 200) {
+            var data = JSON.parse(this.responseText);
+            fetchDataCount++;
+
+            var now = new Date().toLocaleTimeString();
+            var shouldPushLabel = fetchDataCount % labelUpdateInterval === 0;
+
+            // Update labels for both charts
+            updateChartLabels(networkChart, shouldPushLabel ? now : "");
+            updateChartLabels(networkStatsChart, shouldPushLabel ? now : "");
+
+            // Update datasets for networkChart
+            networkChart.data.datasets[0].data.push(
+              data.inFacilityStats.current
+            );
+            networkChart.data.datasets[1].data.push(
+              data.outFacilityStats.current
+            );
+
+            // Update datasets for networkStatsChart
+            networkStatsChart.data.datasets[0].data.push(
+              data.inFacilityStats.average
+            );
+            networkStatsChart.data.datasets[1].data.push(
+              data.inFacilityStats.maximum
+            );
+            networkStatsChart.data.datasets[2].data.push(
+              data.inFacilityStats.minimum
+            );
+
+            // Maintain a rolling window of data
+            maintainRollingWindow(networkChart, 120);
+            maintainRollingWindow(networkStatsChart, 120);
+
+            // Update the charts
+            networkChart.update();
+            networkStatsChart.update();
+
+            // Update additional data fields
+            document.getElementById("inBytes").innerText =
+              data.inFacilityStats.current;
+            document.getElementById("outBytes").innerText =
+              data.outFacilityStats.current;
+            document.getElementById("inError").innerText = data.inError;
+            document.getElementById("outError").innerText = data.outError;
+            document.getElementById("inUnicast").innerText = data.inUnicast;
+            document.getElementById("outUnicast").innerText = data.outUnicast;
+            document.getElementById("inDiscard").innerText = data.inDiscard;
+            document.getElementById("outDiscard").innerText = data.outDiscard;
+            document.getElementById("inNonUnicast").innerText =
+              data.inNonUnicast;
+            document.getElementById("outNonUnicast").innerText =
+              data.outNonUnicast;
+          }
+        };
+        xhr.open("GET", "/get_data", true);
+        xhr.send();
+      }
+
+      function updateChartLabels(chart, label) {
+        chart.data.labels.push(label);
+      }
+
+      function maintainRollingWindow(chart, maxSize) {
+        if (chart.data.labels.length > maxSize) {
+          chart.data.labels.shift();
+          chart.data.datasets.forEach((dataset) => {
+            dataset.data.shift();
+          });
+        }
+      }
+
+      setInterval(fetchData, 1000);
+
+      fetchData();
+    });
+  </script>
+</body>
+
+</html>
