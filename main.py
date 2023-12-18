@@ -1,191 +1,160 @@
 from pysnmp.hlapi import (
     getCmd,
+    bulkCmd,
+    nextCmd,
     SnmpEngine,
     CommunityData,
     UdpTransportTarget,
     ContextData,
     ObjectType,
     ObjectIdentity,
-    UdpTransportTarget,
 )
 import time
-import psutil
+import json
 
-import pandas as pd
-
-target = "10.40.1.2"
-community = "public"
-networkData = {
-    "inError": 0,
-    "outError": 0,
-    "inUnicast": 0,
-    "inDiscard": 0,
-    "outUnicast": 0,
-    "outDiscard": 0,
-    "inNonUnicast": 0,
-    "outNonUnicast": 0,
-    "inFacilityStats": [],
-    "outFacilityStats": [],
-}
+# SNMP target device information
+target = "192.168.1.8"  # IP address of the SNMP device
+community = "public"  # SNMP community string for authentication
 
 
-def getSNMPObject(oid, community, ip, port=161):
+# Function to fetch SNMP data for multiple OIDs in a single call
+def get_snmp_data(oids, community, ip, port=161):
+    """
+    Fetch SNMP data for multiple OIDs.
+    :param oids: List of OIDs to query.
+    :param community: SNMP community string.
+    :param ip: IP address of the target device.
+    :param port: SNMP port, default is 161.
+    :return: Dictionary of OID values.
+    """
+    engine = SnmpEngine()
+    auth_data = CommunityData(community)
+    transport = UdpTransportTarget((ip, port))
+    context = ContextData()
+    var_binds = [ObjectType(ObjectIdentity(oid)) for oid in oids]
+    result_data = {}
+
+    # Perform the SNMP GET command
     errorIndication, errorStatus, errorIndex, varBinds = next(
-        getCmd(
-            SnmpEngine(),
-            CommunityData(community),
-            UdpTransportTarget((ip, port)),
-            ContextData(),
-            ObjectType(ObjectIdentity(oid)),
-        )
+        getCmd(engine, auth_data, transport, context, *var_binds)
     )
-
-    if errorIndication:
-        print(f"SNMP Error: {errorIndication}")
-        return 0
-    elif errorStatus:
-        print(
-            f"SNMP Error: {errorStatus.prettyPrint()} at {errorIndex and varBinds[int(errorIndex) - 1][0] or '?'}"
-        )
-        return 0
+    if errorIndication or errorStatus:
+        print(f"SNMP Error: {errorIndication or errorStatus.prettyPrint()}")
+        return None
     else:
         for varBind in varBinds:
-            return int(varBind[1])
-    return 0
+            oid, value = varBind[0].prettyPrint(), varBind[1].prettyPrint()
+            result_data[oid] = value
+    return result_data
 
 
-def calculate_speed(oid, community, target, interval=1):
-    first_poll = int(getSNMPObject(oid, community, target))
-    time.sleep(interval)
-    second_poll = int(getSNMPObject(oid, community, target))
+# Function to perform SNMP bulk request for a specified OID
+def get_bulk_snmp_data(oid, community, ip, port=161):
+    """
+    Fetch bulk SNMP data for a specified OID.
+    :param oid: Base OID for the bulk request.
+    :param community: SNMP community string.
+    :param ip: IP address of the target device.
+    :param port: SNMP port, default is 161.
+    :return: Dictionary of OID values.
+    """
+    result_data = {}
+    for errorIndication, errorStatus, errorIndex, varBinds in bulkCmd(
+        SnmpEngine(),
+        CommunityData(community),
+        UdpTransportTarget((ip, port)),
+        ContextData(),
+        0,
+        25,  # Non-repeaters, max-repetitions
+        ObjectType(ObjectIdentity(oid)),
+    ):
+        if errorIndication or errorStatus:
+            print(f"Bulk SNMP Error: {errorIndication or errorStatus.prettyPrint()}")
+            return None
+        else:
+            for varBind in varBinds:
+                oid, value = varBind[0].prettyPrint(), varBind[1].prettyPrint()
+                result_data[oid] = value
+    return result_data
 
-    # Handling counter wrap
-    if second_poll < first_poll:
-        # Assuming a 32-bit counter, adjust this if using a different size counter
-        counter_max = 2**32
-        byte_diff = (counter_max - first_poll) + second_poll
+
+# Function to perform SNMP walk operation
+def perform_snmp_walk(oid, community, ip, port=161):
+    """
+    Perform an SNMP walk to fetch all data under the specified OID.
+    :param oid: Base OID for the SNMP walk.
+    :param community: SNMP community string.
+    :param ip: IP address of the target device.
+    :param port: SNMP port, default is 161.
+    :return: Dictionary of OID values.
+    """
+    result_data = {}
+    for errorIndication, errorStatus, errorIndex, varBinds in nextCmd(
+        SnmpEngine(),
+        CommunityData(community),
+        UdpTransportTarget((ip, port)),
+        ContextData(),
+        ObjectType(ObjectIdentity(oid)),
+        lexicographicMode=False,
+    ):
+        if errorIndication or errorStatus:
+            print(f"SNMP Error: {errorIndication or errorStatus.prettyPrint()}")
+            break
+        else:
+            for varBind in varBinds:
+                oid, value = varBind[0].prettyPrint(), varBind[1].prettyPrint()
+                result_data[oid] = value
+    return result_data
+
+
+# Function to get interface index based on the provided IP address
+def get_interface_index(target, community, target_ip):
+    """
+    Retrieve the interface index for the given IP address.
+    :param target: IP address of the target device.
+    :param community: SNMP community string.
+    :param target_ip: IP address to find the interface index for.
+    :return: Interface index or None if not found.
+    """
+    oid = f"1.3.6.1.2.1.4.20.1.2.{target_ip}"
+    result_data = get_snmp_data([oid], community, target)
+    return list(result_data.values())[0] if result_data else None
+
+
+def fetch_traffic_data(target, community):
+    """Fetch inbound and outbound traffic data."""
+    interface_index = get_interface_index(target, community, target)
+    if interface_index:
+        oids = [
+            f"1.3.6.1.2.1.2.2.1.10.{interface_index}",  # Inbound traffic
+            f"1.3.6.1.2.1.2.2.1.16.{interface_index}",  # Outbound traffic
+        ]
+        return get_snmp_data(oids, community, target)
     else:
-        byte_diff = second_poll - first_poll
-
-    speed_bps = (byte_diff * 8) / interval
-    speed_mbps = speed_bps / 10**6
-    return max(0, speed_mbps)  # Ensure negative values are not returned
+        return {"error": "Interface index could not be determined."}
 
 
-def getInOutTraffic():
-    in_speed = calculate_speed("1.3.6.1.2.1.2.2.1.10.1", community, target)
-    out_speed = calculate_speed("1.3.6.1.2.1.2.2.1.16.1", community, target)
-
-    yield in_speed, out_speed
-
-
-def getDiscards():
-    in_discards = int(getSNMPObject("1.3.6.1.2.1.2.2.1.13.1", community, target))
-    out_discards = int(getSNMPObject("1.3.6.1.2.1.2.2.1.19.1", community, target))
-
-    # print(f"Incoming Discards: {in_discards}")
-    # print(f"Outgoing Discards: {out_discards}")
-
-    yield in_discards, out_discards
-
-
-def getInOutErrors():
-    inError = int(getSNMPObject("1.3.6.1.2.1.2.2.1.14.1", community, target))
-    outError = int(getSNMPObject("1.3.6.1.2.1.2.2.1.20.1", community, target))
-
-    # print(f"Incoming Errors: {inError}")
-    # print(f"Outgoing Errors: {outError}")
-
-    yield inError, outError
-
-
-def getInoutUnicast():
-    inUnicast = int(getSNMPObject("1.3.6.1.2.1.2.2.1.11.1", community, target))
-    outUnicast = int(getSNMPObject("1.3.6.1.2.1.2.2.1.17.1", community, target))
-
-    # print(f"Incoming Unicast: {inUnicast}")
-    # print(f"Outgoing Unicast: {outUnicast}")
-
-    yield inUnicast, outUnicast
-
-
-def getInOutNonUnicast():
-    inNonUnicast = int(getSNMPObject("1.3.6.1.2.1.2.2.1.12.1", community, target))
-    outNonUnicast = int(getSNMPObject("1.3.6.1.2.1.2.2.1.18.1", community, target))
-
-    # print(f"Incoming Non-Unicast: {inNonUnicast}")
-    # print(f"Outgoing Non-Unicast: {outNonUnicast}")
-
-    yield inNonUnicast, outNonUnicast
-
-
-# Get max, min, mean, and current traffic
-def getFacilityTraffic(data):
-    return {
-        "average": data.mean(),
-        "maximum": data.max(),
-        "minimum": data.min(),
-        "current": data.iloc[-1],
-    }
-
-
-def list_network_interfaces():
-    interfaces = psutil.net_if_addrs()
-    for interface_name, interface_addresses in interfaces.items():
-        print(f"Interface: {interface_name}")
-        for address in interface_addresses:
-            if str(address.family) == "AddressFamily.AF_INET":
-                print(f"  IP Address: {address.address}")
-                print(f"  Netmask: {address.netmask}")
-                print(f"  Broadcast IP: {address.broadcast}")
-            elif str(address.family) == "AddressFamily.AF_PACKET":
-                print(f"  MAC Address: {address.address}")
-                print(f"  Netmask: {address.netmask}")
-                print(f"  Broadcast MAC: {address.broadcast}")
+def fetch_system_and_tcp_data(target, community):
+    """Fetch detailed system and TCP connection table data."""
+    system_data = perform_snmp_walk("1.3.6.1.2.1.1", community, target)
+    tcp_data = get_bulk_snmp_data("1.3.6.1.2.1.6.13", community, target)
+    return {"system_data": system_data, "tcp_connection_table": tcp_data}
 
 
 def main():
-    global networkData
+    start_time = time.time()
 
-    inOutBytes = pd.DataFrame(columns=["In", "Out"])
-    inOutErrors = pd.DataFrame(columns=["In", "Out"])
-    inOutUnicast = pd.DataFrame(columns=["In", "Out"])
-    inOutDiscards = pd.DataFrame(columns=["In", "Out"])
-    inOutNonUnicast = pd.DataFrame(columns=["In", "Out"])
+    # Fetch Traffic Data
+    traffic_data = fetch_traffic_data(target, community)
+    print("Traffic Data:", json.dumps(traffic_data, indent=4))
 
-    while True:
-        inBytes, outBytes = next(getInOutTraffic())
-        inDiscard, outDiscard = next(getDiscards())
-        inError, outError = next(getInOutErrors())
-        inUnicast, outUnicast = next(getInoutUnicast())
-        inNonUnicast, outNonUnicast = next(getInOutNonUnicast())
+    # Fetch Detailed System and TCP Data
+    detailed_data = fetch_system_and_tcp_data(target, community)
+    print("Detailed Data:", json.dumps(detailed_data, indent=4))
 
-        inOutBytes.loc[len(inOutBytes)] = [inBytes, outBytes]
-        inOutErrors.loc[len(inOutErrors)] = [inError, outError]
-        inOutUnicast.loc[len(inOutUnicast)] = [inUnicast, outUnicast]
-        inOutDiscards.loc[len(inOutDiscards)] = [inDiscard, outDiscard]
-        inOutNonUnicast.loc[len(inOutNonUnicast)] = [inNonUnicast, outNonUnicast]
-
-        inFacilityStats = getFacilityTraffic(inOutBytes["In"])
-        outFacilityStats = getFacilityTraffic(inOutBytes["Out"])
-
-        networkData["inError"] = inError
-        networkData["outError"] = outError
-        networkData["inUnicast"] = inUnicast
-        networkData["inDiscard"] = inDiscard
-        networkData["outUnicast"] = outUnicast
-        networkData["outDiscard"] = outDiscard
-        networkData["inNonUnicast"] = inNonUnicast
-        networkData["outNonUnicast"] = outNonUnicast
-        networkData["inFacilityStats"] = inFacilityStats
-        networkData["outFacilityStats"] = outFacilityStats
-
-    time.sleep(1)
-    # print(f"Incoming Facility Stats: {inFacilityStats}")
-    # print(f"Outgoing Facility Stats: {outFacilityStats}")
-    # print(f"Total Discards: {inDiscard + outDiscard}")
+    end_time = time.time()
+    print(f"Execution Time: {end_time - start_time} seconds")
 
 
 if __name__ == "__main__":
-    list_network_interfaces()
     main()
